@@ -251,11 +251,23 @@ function Send-GS($path, $obj) {
 # RGB-Pegel: F1-F4 = CPU, F5-F8 = GPU, F9-F12 = Wasser (HID-Codes 58..69), Farbverlauf Gruen -> Rot
 $rgbGroups = [ordered]@{ RGB_CPU = 58..61; RGB_GPU = 62..65; RGB_WATER = 66..69 }
 $script:rgbBound = $false
+function Get-RgbRanges {
+    # 10 Stufen: Gruen -> Gelb (50 %) -> Rot. Mehr als zwei Farben gehen in GameSense nur ueber Bereiche mit statischer Farbe
+    $green = 0, 220, 80; $yellow = 255, 215, 0; $red = 255, 40, 40
+    $ranges = @()
+    for ($i = 0; $i -lt 10; $i++) {
+        $t = ($i * 10 + 5) / 100.0   # Mitte der Stufe
+        if ($t -lt 0.5) { $a = $green; $b = $yellow; $f = $t * 2 } else { $a = $yellow; $b = $red; $f = ($t - 0.5) * 2 }
+        $c = 0..2 | ForEach-Object { [int][math]::Round($a[$_] + ($b[$_] - $a[$_]) * $f) }
+        $ranges += @{ low = $i * 10; high = $(if ($i -eq 9) { 100 } else { $i * 10 + 9 }); color = @{ red = $c[0]; green = $c[1]; blue = $c[2] } }
+    }
+    , $ranges
+}
 function Bind-Rgb {
-    $grad = @{ gradient = @{ zero = @{ red = 0; green = 220; blue = 80 }; hundred = @{ red = 255; green = 40; blue = 40 } } }
+    $ranges = Get-RgbRanges
     foreach ($e in $rgbGroups.Keys) {
         Send-GS 'bind_game_event' @{ game = $game; event = $e; min_value = 0; max_value = 100; icon_id = 0
-            handlers = @(@{ 'device-type' = 'rgb-per-key-zones'; 'custom-zone-keys' = @($rgbGroups[$e]); mode = 'percent'; color = $grad }) }
+            handlers = @(@{ 'device-type' = 'rgb-per-key-zones'; 'custom-zone-keys' = @($rgbGroups[$e]); mode = 'percent'; color = $ranges }) }
     }
     $script:rgbBound = $true
 }

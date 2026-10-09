@@ -141,7 +141,7 @@ function Get-Lines([string]$page) {
         'arc' {
             $n = Get-ArcPlayers
             $txt = if ($null -ne $n) { $n.ToString('N0', [Globalization.CultureInfo]::GetCultureInfo('de-DE')) } else { '--' }
-            @('ARC Raiders (Steam)', ('Spieler {0}' -f $txt))
+            @('ARC Raiders',('Spieler {0}' -f $txt))
         }
     }
 }

@@ -1,7 +1,9 @@
 ﻿{
     "pages":  {
+                  "net":  false,
                   "cpugpu":  true,
-                  "water":  true,
-                  "gpuload":  false
+                  "gpuload":  false,
+                  "water":  false,
+                  "arc":  false
               }
 }

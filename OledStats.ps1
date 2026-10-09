@@ -157,8 +157,10 @@ function Get-Lines([string]$page) {
         'cpugpu' {
             $c = Get-CpuStats; $g = Get-GpuStats
             # Ein Leerzeichen zwischen allen Teilen; Temperatur ohne Einheit, damit die GPU-Zeile ins Display passt
-            @(('CPU {0} {1} {2}' -f (Fmt $c.Temp ''), (Fmt $c.Load '%'), (Fmt $c.Watt 'W')),
-              ('GPU {0} {1} {2}' -f (Fmt $g.Temp ''), (Fmt $g.Load '%'), (Fmt $g.Watt 'W')))
+            $l = @(('CPU {0} {1} {2}' -f (Fmt $c.Temp ''), (Fmt $c.Load '%'), (Fmt $c.Watt 'W')),
+                   ('GPU {0} {1} {2}' -f (Fmt $g.Temp ''), (Fmt $g.Load '%'), (Fmt $g.Watt 'W')))
+            # Mehr als 15 Zeichen passen nicht ins Display (z. B. "GPU 37 100% 116W"): dann das W weglassen
+            @($l | ForEach-Object { if ($_.Length -gt 15) { $_.TrimEnd('W') } else { $_ } })
         }
         'water' {
             $w = Get-WaterStats

@@ -33,6 +33,7 @@ $pageDefs = [ordered]@{
     water   = 'Wasserkuehlung (Kraken)'
     gpuload = 'GPU-Last + VRAM'
     arc     = 'ARC Raiders: Steam-Spieler'
+    net     = 'Netzwerk: Download / Upload'
 }
 $ArcAppId = 1808500
 $ArcRefreshSeconds = 60
@@ -102,6 +103,39 @@ function Get-GpuStats {
 
 function Fmt($v, $unit) { if ($null -eq $v) { '--' } else { '{0}{1}' -f ([math]::Round($v)).ToString([Globalization.CultureInfo]::InvariantCulture), $unit } }
 
+# Netzwerk: Durchsatz in Mbit/s aus den Adapter-Zaehlern (nur echte Ethernet-/WLAN-Adapter)
+$script:netPrev = @{}; $script:netPrevAt = 0L; $script:netDown = $null; $script:netUp = $null
+function Update-Net {
+    $now = [Diagnostics.Stopwatch]::GetTimestamp()
+    $cur = @{}
+    foreach ($n in [System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces()) {
+        if ($n.OperationalStatus -ne 'Up') { continue }
+        if ($n.NetworkInterfaceType -notin 'Ethernet', 'Wireless80211', 'GigabitEthernet') { continue }
+        if ($n.Description -match 'Virtual|vEthernet|VMware|VirtualBox|Hyper-V|Bluetooth|TAP|WireGuard|Tunnel|Loopback|Wi-Fi Direct') { continue }
+        $st = $n.GetIPStatistics()
+        $cur[$n.Id] = @($st.BytesReceived, $st.BytesSent)
+    }
+    if ($script:netPrevAt -gt 0) {
+        $dt = ($now - $script:netPrevAt) / [double][Diagnostics.Stopwatch]::Frequency
+        if ($dt -gt 0) {
+            $rx = 0.0; $tx = 0.0
+            foreach ($id in $cur.Keys) {
+                if (-not $script:netPrev.ContainsKey($id)) { continue }
+                $d1 = $cur[$id][0] - $script:netPrev[$id][0]; $d2 = $cur[$id][1] - $script:netPrev[$id][1]
+                if ($d1 -gt 0) { $rx += $d1 }; if ($d2 -gt 0) { $tx += $d2 }
+            }
+            $script:netDown = $rx * 8 / $dt / 1e6
+            $script:netUp = $tx * 8 / $dt / 1e6
+        }
+    }
+    $script:netPrev = $cur; $script:netPrevAt = $now
+}
+function Fmt-Mbit($v) {
+    if ($null -eq $v) { return '--' }
+    $ci = [Globalization.CultureInfo]::InvariantCulture
+    if ($v -ge 100) { ([math]::Round($v)).ToString('0', $ci) } else { $v.ToString('0.0', $ci) }
+}
+
 $script:arcCount = $null
 $script:arcFetchedAt = [datetime]::MinValue
 
@@ -137,6 +171,9 @@ function Get-Lines([string]$page) {
                 'VRAM {0}/{1}G' -f ($g.MemUsed / 1024).ToString('0.0', $ci), ($g.MemTotal / 1024).ToString('0', $ci)
             } else { 'VRAM --' }
             @(('GPU Last {0}' -f (Fmt $g.Load '%')), $vram)
+        }
+        'net' {
+            @(('Down {0} Mb/s' -f (Fmt-Mbit $script:netDown)), ('Up   {0} Mb/s' -f (Fmt-Mbit $script:netUp)))
         }
         'arc' {
             $n = Get-ArcPlayers
@@ -186,6 +223,7 @@ function Register-App {
 
 # --- Testmodus: alle Seiten einmal ausgeben, ohne GG und Tray ------------------
 if ($Once) {
+    Update-Net; Start-Sleep -Seconds 2; Update-Net   # Netzwerk braucht zwei Messpunkte
     foreach ($k in $pageDefs.Keys) { "[$k]"; Get-Lines $k }
     $pc.Close(); return
 }
@@ -240,6 +278,7 @@ $script:timer.Interval = $IntervalMs
 $script:timer.Add_Tick({
     try {
         if ((Get-Date) -lt $script:retryAt) { return }
+        Update-Net   # jede Sekunde messen, damit der Durchsatz auch nach einem Seitenwechsel stimmt
         $pages = @(Get-ActivePages)   # @() verhindert, dass eine einzelne Seite zum String wird
         $page = $pages[[int]([math]::Floor($script:clock.Elapsed.TotalSeconds / $PageSeconds) % $pages.Count)]
         $lines = Get-Lines $page

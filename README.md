@@ -6,6 +6,7 @@ Zeigt Live-Werte auf dem OLED der SteelSeries Apex Pro TKL Wireless (über die G
 1. **CPU + GPU:** Temperatur, Last, Leistung (`CPU 59 16% 70W` / `GPU 37 19% 116W`)
 2. **Wasserkühlung:** Flüssigkeitstemperatur und Pumpendrehzahl (NZXT Kraken)
 3. **GPU-Last + VRAM:** `GPU Last 20%` / `VRAM 2.1/10G`
+4. **ARC Raiders:** aktuelle Steam-Spielerzahl (öffentliche Steam-API, App-ID 1808500, Abfrage alle 60 s)
 
 ## Voraussetzungen
 - SteelSeries GG, App **„CPU/GPU Stats“** muss in GG eingeschaltet sein

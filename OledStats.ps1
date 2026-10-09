@@ -32,7 +32,10 @@ $pageDefs = [ordered]@{
     cpugpu  = 'CPU + GPU (Temperatur, Watt)'
     water   = 'Wasserkuehlung (Kraken)'
     gpuload = 'GPU-Last + VRAM'
+    arc     = 'ARC Raiders: Steam-Spieler'
 }
+$ArcAppId = 1808500
+$ArcRefreshSeconds = 60
 $script:cfg = @{}
 foreach ($k in $pageDefs.Keys) { $script:cfg[$k] = $true }
 if (Test-Path $cfgPath) {
@@ -99,6 +102,21 @@ function Get-GpuStats {
 
 function Fmt($v, $unit) { if ($null -eq $v) { '--' } else { '{0}{1}' -f ([math]::Round($v)).ToString([Globalization.CultureInfo]::InvariantCulture), $unit } }
 
+$script:arcCount = $null
+$script:arcFetchedAt = [datetime]::MinValue
+
+function Get-ArcPlayers {
+    # Oeffentliche Steam-Schnittstelle (kein Schluessel noetig); nur alle $ArcRefreshSeconds abfragen
+    if (((Get-Date) - $script:arcFetchedAt).TotalSeconds -ge $ArcRefreshSeconds) {
+        $script:arcFetchedAt = Get-Date   # auch bei Fehlern erst nach der Wartezeit erneut versuchen
+        try {
+            $r = Invoke-RestMethod "https://api.steampowered.com/ISteamUserStats/GetNumberOfCurrentPlayers/v1/?appid=$ArcAppId" -TimeoutSec 4
+            if ($r.response.result -eq 1) { $script:arcCount = [int]$r.response.player_count }
+        } catch { Write-Log "Steam-Abfrage fehlgeschlagen: $($_.Exception.Message)" }
+    }
+    $script:arcCount
+}
+
 function Get-Lines([string]$page) {
     $ci = [Globalization.CultureInfo]::InvariantCulture
     switch ($page) {
@@ -119,6 +137,11 @@ function Get-Lines([string]$page) {
                 'VRAM {0}/{1}G' -f ($g.MemUsed / 1024).ToString('0.0', $ci), ($g.MemTotal / 1024).ToString('0', $ci)
             } else { 'VRAM --' }
             @(('GPU Last {0}' -f (Fmt $g.Load '%')), $vram)
+        }
+        'arc' {
+            $n = Get-ArcPlayers
+            $txt = if ($null -ne $n) { $n.ToString('N0', [Globalization.CultureInfo]::GetCultureInfo('de-DE')) } else { '--' }
+            @('ARC Raiders (Steam)', ('Spieler {0}' -f $txt))
         }
     }
 }

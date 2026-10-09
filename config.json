@@ -1,0 +1,7 @@
+﻿{
+    "pages":  {
+                  "cpugpu":  true,
+                  "water":  true,
+                  "gpuload":  false
+              }
+}

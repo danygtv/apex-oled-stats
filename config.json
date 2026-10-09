@@ -1,9 +1,0 @@
-﻿{
-    "pages":  {
-                  "net":  false,
-                  "cpugpu":  true,
-                  "gpuload":  false,
-                  "water":  false,
-                  "arc":  true
-              }
-}

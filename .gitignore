@@ -1,2 +1,6 @@
 log.txt
 sensors.txt
+# LibreHardwareMonitor-DLLs: mit setup-lib.ps1 herunterladen
+lib/
+# persoenliche Einstellungen (vom Tray-Menue geschrieben)
+config.json

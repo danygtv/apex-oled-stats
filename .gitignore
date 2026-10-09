@@ -1,5 +1,8 @@
 log.txt
 sensors.txt
+# Spielsitzungen (persoenlich)
+sessions/
+TODO.md
 # LibreHardwareMonitor-DLLs: mit setup-lib.ps1 herunterladen
 lib/
 # persoenliche Einstellungen (vom Tray-Menue geschrieben)

@@ -35,10 +35,14 @@ $pageDefs = [ordered]@{
     arc     = 'ARC Raiders: Steam-Spieler'
     net     = 'Netzwerk: Download / Upload'
     peak    = 'Spitzenwerte seit Start'
+    energy  = 'Energie + Kosten (CPU + GPU)'
+    session = 'Spielzeit (nur waehrend eines Spiels)'
 }
 $optionDefs = [ordered]@{
-    warn = 'Warnung bei Ueberhitzung (Display + rotes Blinken)'
-    rgb  = 'RGB-Pegel auf F1-F12 (CPU / GPU / Wasser)'
+    warn  = 'Warnung bei Ueberhitzung (Display + rotes Blinken)'
+    rgb   = 'RGB-Pegel auf F1-F12 (CPU / GPU / Wasser)'
+    games = 'Spiele erkennen (Spielzeit, Reset, Sitzungsbericht)'
+    break = 'Pausenerinnerung (blaues Blinken)'
 }
 $ArcAppId = 1808500
 $ArcRefreshSeconds = 60
@@ -46,16 +50,36 @@ $ArcRefreshSeconds = 60
 $script:cfg = @{}; foreach ($k in $pageDefs.Keys) { $script:cfg[$k] = $true }
 $script:opt = @{}; foreach ($k in $optionDefs.Keys) { $script:opt[$k] = $true }
 $script:warnCfg = @{ cpu = 95; gpu = 83; water = 55 }   # Schwellen in Grad C
+# Weitere Einstellungen (nur in config.json aenderbar):
+#   price         Strompreis in EUR pro kWh
+#   breakHours    Pausenerinnerung nach so vielen Stunden Spielzeit (danach stuendlich)
+#   extraGames    Prozessnamen ohne .exe fuer Spiele ausserhalb von Steam, z. B. ["Fortnite"]
+#   ignoreFolders Ordner unter steamapps\common, die KEIN Spiel sind (laufen dauerhaft)
+$script:extra = @{
+    price = 0.35
+    breakHours = 2
+    extraGames = @()
+    ignoreFolders = @('Steamworks Shared', 'wallpaper_engine', 'Steam Controller Configs', 'DisplayFusion')
+}
 if (Test-Path $cfgPath) {
     try {
         $saved = Get-Content $cfgPath -Raw | ConvertFrom-Json
         foreach ($k in $pageDefs.Keys) { if ($null -ne $saved.pages.$k) { $script:cfg[$k] = [bool]$saved.pages.$k } }
         foreach ($k in $optionDefs.Keys) { if ($null -ne $saved.options.$k) { $script:opt[$k] = [bool]$saved.options.$k } }
         foreach ($k in 'cpu', 'gpu', 'water') { if ($null -ne $saved.warn.$k) { $script:warnCfg[$k] = [double]$saved.warn.$k } }
+        if ($null -ne $saved.price) { $script:extra.price = [double]$saved.price }
+        if ($null -ne $saved.breakHours) { $script:extra.breakHours = [double]$saved.breakHours }
+        if ($null -ne $saved.extraGames) { $script:extra.extraGames = @($saved.extraGames) }
+        if ($null -ne $saved.ignoreFolders) { $script:extra.ignoreFolders = @($saved.ignoreFolders) }
     } catch { Write-Log "config.json unlesbar: $($_.Exception.Message)" }
 }
 function Save-Config {
-    try { (@{ pages = $script:cfg; options = $script:opt; warn = $script:warnCfg } | ConvertTo-Json) | Set-Content -Path $cfgPath -Encoding UTF8 } catch { Write-Log "config.json nicht speicherbar: $($_.Exception.Message)" }
+    try {
+        (@{ pages = $script:cfg; options = $script:opt; warn = $script:warnCfg
+            price = $script:extra.price; breakHours = $script:extra.breakHours
+            extraGames = @($script:extra.extraGames); ignoreFolders = @($script:extra.ignoreFolders) } | ConvertTo-Json) |
+            Set-Content -Path $cfgPath -Encoding UTF8
+    } catch { Write-Log "config.json nicht speicherbar: $($_.Exception.Message)" }
 }
 
 # --- Sensoren -------------------------------------------------------------
@@ -118,10 +142,24 @@ $script:peak = @{}
 function Update-Peak($key, $v) {
     if ($null -ne $v -and ($null -eq $script:peak[$key] -or $v -gt $script:peak[$key])) { $script:peak[$key] = $v }
 }
+$script:energyWh = 0.0          # CPU- + GPU-Leistung seit Skriptstart, aufsummiert
+$script:session = $null         # laufende Spielsitzung (siehe Update-Game)
+$script:lastSampleAt = 0L
 function Sample-All {
     $script:snap = @{ cpu = (Get-CpuStats); gpu = (Get-GpuStats); water = (Get-WaterStats) }
     Update-Peak 'cpuT' $script:snap.cpu.Temp; Update-Peak 'cpuW' $script:snap.cpu.Watt
     Update-Peak 'gpuT' $script:snap.gpu.Temp; Update-Peak 'gpuW' $script:snap.gpu.Watt
+    # Energie: Watt * Sekunden / 3600 = Wh. Zu lange Pausen (z. B. GG nicht erreichbar) werden nicht mitgerechnet.
+    $now = [Diagnostics.Stopwatch]::GetTimestamp()
+    if ($script:lastSampleAt -gt 0) {
+        $dt = ($now - $script:lastSampleAt) / [double][Diagnostics.Stopwatch]::Frequency
+        if ($dt -gt 0 -and $dt -le 5) {
+            $w = [double]$script:snap.cpu.Watt + [double]$script:snap.gpu.Watt
+            $script:energyWh += $w * $dt / 3600
+            if ($script:session) { $script:session.wh += $w * $dt / 3600 }
+        }
+    }
+    $script:lastSampleAt = $now
 }
 
 # Netzwerk: Durchsatz in Mbit/s aus den Adapter-Zaehlern (nur echte Ethernet-/WLAN-Adapter)
@@ -172,6 +210,119 @@ function Get-ArcPlayers {
     $script:arcCount
 }
 
+# --- Spiele erkennen, Sitzungen, Sitzungsbericht, Pausenerinnerung -----------------
+$script:notice = $null            # kurze Meldung mit Vorrang vor den Seiten (Sitzungsbericht, Pausenerinnerung)
+$script:lastGameCheck = [datetime]::MinValue
+$script:gameLastSeen = [datetime]::MinValue
+$sessionDir = Join-Path $root 'sessions'
+$inv = [Globalization.CultureInfo]::InvariantCulture
+
+function Short([string]$s, [int]$n) { if ($s.Length -gt $n) { $s.Substring(0, $n) } else { $s } }
+function Fmt-Dur([timespan]$t) {
+    if ($t.TotalHours -ge 1) { '{0}h{1:00}' -f [int][math]::Floor($t.TotalHours), $t.Minutes }
+    else { '{0} min' -f [int][math]::Floor($t.TotalMinutes) }
+}
+function Get-EnergyLines($wh, [string]$label) {
+    @(('{0} {1}kWh' -f $label, ($wh / 1000).ToString('0.00', $inv)),
+      ('ca. {0} EUR' -f ($wh / 1000 * $script:extra.price).ToString('0.00', $inv)))
+}
+function New-Notice($frames, [int]$seconds) {
+    $list = New-Object System.Collections.ArrayList
+    foreach ($f in $frames) { [void]$list.Add($f) }
+    $script:notice = @{ started = Get-Date; until = (Get-Date).AddSeconds($seconds); frames = $list }
+}
+
+function Find-Game {
+    # 1) Prozesse unter ...\steamapps\common\<Spiel>\  (jede Steam-Bibliothek), 2) Prozessnamen aus extraGames
+    $found = $null
+    try {
+        $procs = Get-CimInstance Win32_Process -Filter "ExecutablePath LIKE '%\\steamapps\\common\\%'" -Property Name, ExecutablePath
+        foreach ($p in $procs) {
+            if ($p.Name -match 'Crash|Helper|EasyAnti|BattlEye|Redist|Prereq|Setup|Installer|Bootstrap|Reporter|Anticheat') { continue }
+            if ($p.ExecutablePath -match '\\steamapps\\common\\([^\\]+)\\') {
+                if ($script:extra.ignoreFolders -contains $Matches[1]) { continue }
+                $found = $Matches[1]; break
+            }
+        }
+    } catch { Write-Log "Spielerkennung fehlgeschlagen: $($_.Exception.Message)" }
+    if (-not $found) {
+        foreach ($g in @($script:extra.extraGames)) {
+            if ($g -and (Get-Process -Name $g -ErrorAction SilentlyContinue)) { $found = [string]$g; break }
+        }
+    }
+    $found
+}
+
+function Start-Session([string]$name) {
+    $script:peak = @{}   # Spitzenwerte gelten ab jetzt fuer dieses Spiel
+    $script:session = @{ name = $name; start = Get-Date; wh = 0.0; csv = $null; lastCsv = [datetime]::MinValue
+                         nextBreak = (Get-Date).AddHours($script:extra.breakHours) }
+    try {
+        New-Item -ItemType Directory -Force $sessionDir | Out-Null
+        $safe = $name -replace '[^\w\.-]+', '_'
+        $script:session.csv = Join-Path $sessionDir ('{0:yyyy-MM-dd_HHmm}_{1}.csv' -f (Get-Date), $safe)
+        'zeit;cpu_temp;cpu_last;cpu_watt;gpu_temp;gpu_last;gpu_watt;vram_mb;wasser_temp;down_mbit;up_mbit' | Set-Content $script:session.csv -Encoding UTF8
+    } catch { Write-Log "Sitzungsdatei nicht anlegbar: $($_.Exception.Message)"; $script:session.csv = $null }
+    Write-Log "Spiel gestartet: $name"
+}
+
+function Write-SessionRow {
+    $s = $script:session
+    if (-not $s -or -not $s.csv -or ((Get-Date) - $s.lastCsv).TotalSeconds -lt 10) { return }
+    $s.lastCsv = Get-Date
+    $c = $script:snap.cpu; $g = $script:snap.gpu; $w = $script:snap.water
+    $f = { param($v, $d) if ($null -eq $v) { '' } else { ([double]$v).ToString($d, $inv) } }
+    $row = @((Get-Date).ToString('yyyy-MM-dd HH:mm:ss'), (& $f $c.Temp '0.0'), (& $f $c.Load '0.0'), (& $f $c.Watt '0.0'),
+             (& $f $g.Temp '0.0'), (& $f $g.Load '0.0'), (& $f $g.Watt '0.0'), (& $f $g.MemUsed '0'), (& $f $w.Temp '0.0'),
+             (& $f $script:netDown '0.0'), (& $f $script:netUp '0.0')) -join ';'
+    try { Add-Content -Path $s.csv -Value $row -Encoding UTF8 } catch { Write-Log "Sitzungsdatei nicht beschreibbar: $($_.Exception.Message)" }
+}
+
+function End-Session {
+    $s = $script:session; $script:session = $null
+    $dur = (Get-Date) - $s.start
+    # Bericht: 3 Bilder je $PageSeconds Sekunden (Dauer, Spitzenwerte, Energie)
+    New-Notice @(
+        @((Short $s.name 15), ('Dauer ' + (Fmt-Dur $dur))),
+        (Get-Lines 'peak'),
+        (Get-EnergyLines $s.wh 'Spiel')
+    ) (3 * $PageSeconds)
+    try {
+        New-Item -ItemType Directory -Force $sessionDir | Out-Null
+        $sum = Join-Path $sessionDir 'summary.csv'
+        if (-not (Test-Path $sum)) { 'start;ende;spiel;dauer_min;max_cpu_temp;max_cpu_watt;max_gpu_temp;max_gpu_watt;energie_kwh;kosten_eur' | Set-Content $sum -Encoding UTF8 }
+        $p = $script:peak
+        $n = { param($v) if ($null -eq $v) { '' } else { ([double]$v).ToString('0.0', $inv) } }
+        (@($s.start.ToString('yyyy-MM-dd HH:mm'), (Get-Date).ToString('yyyy-MM-dd HH:mm'), $s.name, $dur.TotalMinutes.ToString('0', $inv),
+           (& $n $p.cpuT), (& $n $p.cpuW), (& $n $p.gpuT), (& $n $p.gpuW),
+           ($s.wh / 1000).ToString('0.000', $inv), ($s.wh / 1000 * $script:extra.price).ToString('0.00', $inv)) -join ';') | Add-Content $sum -Encoding UTF8
+    } catch { Write-Log "summary.csv nicht beschreibbar: $($_.Exception.Message)" }
+    Write-Log ('Spiel beendet: {0} nach {1:0} min, {2:0.000} kWh' -f $s.name, $dur.TotalMinutes, ($s.wh / 1000))
+}
+
+function Update-Game {
+    if (-not $script:opt.games) { if ($script:session) { End-Session }; return }
+    if (((Get-Date) - $script:lastGameCheck).TotalSeconds -lt 5) { return }
+    $script:lastGameCheck = Get-Date
+    $name = Find-Game
+    if ($name) {
+        $script:gameLastSeen = Get-Date
+        if (-not $script:session) { Start-Session $name }
+    }
+    elseif ($script:session -and ((Get-Date) - $script:gameLastSeen).TotalSeconds -gt 20) { End-Session }
+}
+
+# Pausenerinnerung nach breakHours Stunden Spielzeit, danach stuendlich. Gibt $true zurueck, wenn sie jetzt ausloest.
+function Test-Break {
+    if (-not ($script:opt.break -and $script:session)) { return $false }
+    if ((Get-Date) -lt $script:session.nextBreak) { return $false }
+    $h = [math]::Round(((Get-Date) - $script:session.start).TotalHours)
+    $script:session.nextBreak = $script:session.nextBreak.AddHours(1)
+    New-Notice @(, @(('Pause? {0}h' -f $h), 'Kurz aufstehen')) 10
+    Write-Log "Pausenerinnerung nach $h h ($($script:session.name))"
+    $true
+}
+
 # Mehr als 15 Zeichen passen nicht ins Display (z. B. "GPU 37 100% 116W"): dann das W weglassen
 function Limit-Lines($lines) { @($lines | ForEach-Object { if ($_.Length -gt 15) { $_.TrimEnd('W') } else { $_ } }) }
 
@@ -202,6 +353,13 @@ function Get-Lines([string]$page) {
             $txt = if ($null -ne $n) { $n.ToString('N0', [Globalization.CultureInfo]::GetCultureInfo('de-DE')) } else { '--' }
             @('ARC Raiders', ('Spieler {0}' -f $txt))
         }
+        'energy' {
+            if ($script:session) { Get-EnergyLines $script:session.wh 'Spiel' } else { Get-EnergyLines $script:energyWh 'Total' }
+        }
+        'session' {
+            if ($script:session) { @((Short $script:session.name 15), ('Zeit ' + (Fmt-Dur ((Get-Date) - $script:session.start)))) }
+            else { @('Kein Spiel', 'erkannt') }
+        }
         'peak' {
             $p = $script:peak
             Limit-Lines @(('Max CPU {0} {1}' -f (Fmt $p.cpuT ''), (Fmt $p.cpuW 'W')),
@@ -210,7 +368,12 @@ function Get-Lines([string]$page) {
     }
 }
 
-function Get-ActivePages { @($pageDefs.Keys | Where-Object { $script:cfg[$_] }) }
+# "session" erscheint nur, solange ein Spiel laeuft; ohne aktive Seite faellt die Anzeige auf CPU + GPU zurueck
+function Get-ActivePages {
+    $p = @($pageDefs.Keys | Where-Object { $script:cfg[$_] -and ($_ -ne 'session' -or $script:session) })
+    if ($p.Count -eq 0) { $p = @('cpugpu') }
+    $p
+}
 
 # --- Ueberhitzungswarnung ----------------------------------------------------
 $script:warnState = @{ cpu = $false; gpu = $false; water = $false }
@@ -302,7 +465,10 @@ function Register-App {
     # Warn-Blinken: Zahlenreihe 1-0 blinkt rot
     Send-GS 'bind_game_event' @{ game = $game; event = 'RGB_FLASH'; min_value = 0; max_value = 100; icon_id = 0
         handlers = @(@{ 'device-type' = 'rgb-per-key-zones'; zone = 'number-keys'; mode = 'color'; color = @{ red = 255; green = 0; blue = 0 }; rate = @{ frequency = 4; repeat_limit = 8 } }) }
-    $script:rgbBound = $false   # Pegel-Events werden in Sync-Rgb je nach Option neu gebunden
+    # Pausenerinnerung: Zahlenreihe blinkt langsam blau
+    Send-GS 'bind_game_event' @{ game = $game; event = 'RGB_BREAK'; min_value = 0; max_value = 100; icon_id = 0
+        handlers = @(@{ 'device-type' = 'rgb-per-key-zones'; zone = 'number-keys'; mode = 'color'; color = @{ red = 60; green = 120; blue = 255 }; rate = @{ frequency = 1; repeat_limit = 6 } }) }
+    $script:rgbBound = $false   # Pegel-Events werden in Send-Rgb je nach Option neu gebunden
 }
 
 # Pegel- und Blink-Events pro Sekunde senden bzw. entfernen
@@ -366,7 +532,7 @@ foreach ($k in $pageDefs.Keys) {
     $item.Add_Click({
         param($sender, $e)
         $key = [string]$sender.Tag
-        if ($script:cfg[$key] -and @(Get-ActivePages).Count -le 1) { return }   # mindestens eine Seite bleibt an
+        if ($script:cfg[$key] -and @($pageDefs.Keys | Where-Object { $script:cfg[$_] }).Count -le 1) { return }   # mindestens eine Seite bleibt an
         $script:cfg[$key] = -not $script:cfg[$key]
         $sender.Checked = $script:cfg[$key]
         Save-Config
@@ -408,10 +574,18 @@ $script:timer.Add_Tick({
         Update-Net     # jede Sekunde messen, damit der Durchsatz auch nach einem Seitenwechsel stimmt
         Sample-All     # Sensoren einmal lesen (auch fuer Spitzenwerte, Warnungen und RGB)
         Update-Warnings
+        Update-Game
+        $breakNow = Test-Break
+        Write-SessionRow
         $warns = @(Get-ActiveWarnings)
         $step = [int]([math]::Floor($script:clock.Elapsed.TotalSeconds / $PageSeconds))
+        $noticeOn = $script:notice -and (Get-Date) -lt $script:notice.until
         if ($warns.Count -gt 0) {
-            $lines = Get-WarnLines $warns[$step % $warns.Count]   # Warnung hat Vorrang vor allen Seiten
+            $lines = Get-WarnLines $warns[$step % $warns.Count]   # Warnung hat Vorrang vor allem
+        } elseif ($noticeOn) {
+            # Meldung (Sitzungsbericht, Pausenerinnerung): Bilder im Wechsel, ab der ersten Sekunde der Meldung
+            $n = $script:notice
+            $lines = $n.frames[[int]([math]::Floor(((Get-Date) - $n.started).TotalSeconds / $PageSeconds)) % $n.frames.Count]
         } else {
             $pages = @(Get-ActivePages)   # @() verhindert, dass eine einzelne Seite zum String wird
             $lines = Get-Lines $pages[$step % $pages.Count]
@@ -420,6 +594,7 @@ $script:timer.Add_Tick({
         if (-not $script:registered) { Register-App; $script:registered = $true }
         Send-GS 'game_event' @{ game = $game; event = 'STATS'; data = @{ value = $script:tick; frame = @{ l1 = $lines[0]; l2 = $lines[1] } } }
         Send-Rgb
+        if ($breakNow) { Send-GS 'game_event' @{ game = $game; event = 'RGB_BREAK'; data = @{ value = 1 } } }
     }
     catch {
         # GG noch nicht bereit, neu gestartet oder anderer Port: spaeter neu anmelden

@@ -13,12 +13,27 @@ Das OLED nimmt über GameSense nur zwei Textzeilen mit etwa 15 Zeichen an.
 4. **ARC Raiders:** aktuelle Steam-Spielerzahl (öffentliche Steam-API, App-ID 1808500, Abfrage alle 60 s)
 5. **Netzwerk:** Download und Upload in Mbit/s (Summe aller aktiven Ethernet-/WLAN-Adapter, ohne virtuelle)
 6. **Spitzenwerte:** höchste CPU-/GPU-Temperatur und Leistung seit Start (im Tray-Menü zurücksetzbar)
+7. **Energie + Kosten:** `Total 0.42kWh` / `ca. 0.15 EUR` – CPU- plus GPU-Leistung aufsummiert (nicht der ganze PC). Während eines Spiels zeigt die Seite nur dessen Verbrauch (`Spiel …`).
+8. **Spielzeit:** Name und Dauer des erkannten Spiels (erscheint nur, solange eins läuft)
 
 ## Optionen (Tray-Menü)
 - **Überhitzungswarnung:** Das Display zeigt `!! GPU HEISS !!` mit Vorrang vor allen Seiten, die Zahlenreihe 1–0 blinkt rot.
   Schwellen in `config.json` unter `warn` (Standard: CPU 95 °C, GPU 83 °C, Wasser 55 °C; 3 °C Hysterese).
 - **RGB-Pegel:** F1–F4 = CPU, F5–F8 = GPU, F9–F12 = Wasser. Je höher die Temperatur, desto mehr Tasten leuchten (Farbe grün → gelb → rot in 10 Stufen, Skala bis zur Warnschwelle).
 - „Warnung testen (10 s)“ simuliert 99 °C an der GPU.
+- **Spiele erkennen:** Läuft ein Prozess unter `…\steamapps\common\<Spiel>\` (jede Steam-Bibliothek), startet eine Sitzung:
+  Spitzenwerte werden zurückgesetzt, Spielzeit und Energie werden gezählt, alle 10 s kommt eine Zeile in `sessions\<datum>_<spiel>.csv`.
+  Endet das Spiel (20 s Karenz), zeigt das Display 3 Bilder lang einen **Bericht** (Dauer, Spitzenwerte, Energie), dazu eine Zeile in `sessions\summary.csv`.
+- **Pausenerinnerung:** Nach 2 h Spielzeit (dann stündlich) zeigt das Display `Pause? 2h`, die Zahlenreihe blinkt langsam blau.
+
+### Weitere Einstellungen (nur in `config.json`)
+| Schlüssel | Bedeutung | Standard |
+|---|---|---|
+| `price` | Strompreis in EUR pro kWh | `0.35` |
+| `breakHours` | Pausenerinnerung nach … Stunden | `2` |
+| `extraGames` | Prozessnamen ohne `.exe` für Spiele außerhalb von Steam, z. B. `["Fortnite"]` | `[]` |
+| `ignoreFolders` | Ordner unter `steamapps\common`, die kein Spiel sind (Dauerläufer) | Steamworks Shared, wallpaper_engine, Steam Controller Configs, DisplayFusion |
+| `warn` | Warnschwellen in °C (`cpu`, `gpu`, `water`) | 95 / 83 / 55 |
 
 ## Voraussetzungen
 - SteelSeries GG, die App **„CPU/GPU Stats“** muss in GG eingeschaltet sein

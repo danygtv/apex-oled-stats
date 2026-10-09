@@ -4,6 +4,6 @@
                   "cpugpu":  true,
                   "gpuload":  false,
                   "water":  false,
-                  "arc":  false
+                  "arc":  true
               }
 }

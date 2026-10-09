@@ -8,6 +8,13 @@ Zeigt Live-Werte auf dem OLED der SteelSeries Apex Pro TKL Wireless (über die G
 3. **GPU-Last + VRAM:** `GPU Last 20%` / `VRAM 2.1/10G`
 4. **ARC Raiders:** aktuelle Steam-Spielerzahl (öffentliche Steam-API, App-ID 1808500, Abfrage alle 60 s)
 5. **Netzwerk:** Download und Upload in Mbit/s (Summe aller aktiven Ethernet-/WLAN-Adapter, ohne virtuelle)
+6. **Spitzenwerte:** höchste CPU-/GPU-Temperatur und Leistung seit Start (im Tray-Menü zurücksetzbar)
+
+## Optionen (Tray-Menü)
+- **Überhitzungswarnung:** Display zeigt `!! GPU HEISS !!` mit Vorrang vor allen Seiten, die Zahlenreihe 1–0 blinkt rot.
+  Schwellen in `config.json` unter `warn` (Standard: CPU 95 °C, GPU 83 °C, Wasser 55 °C; 3 °C Hysterese).
+- **RGB-Pegel:** F1–F4 = CPU, F5–F8 = GPU, F9–F12 = Wasser, Farbverlauf grün → rot (über GameSense, `rgb-per-key-zones`).
+- „Warnung testen (10 s)“ simuliert 99 °C an der GPU.
 
 ## Voraussetzungen
 - SteelSeries GG, App **„CPU/GPU Stats“** muss in GG eingeschaltet sein

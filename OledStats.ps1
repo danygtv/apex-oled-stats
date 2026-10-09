@@ -1,8 +1,8 @@
 # Zeigt CPU/GPU/Wasser-Werte auf dem OLED der SteelSeries Apex Pro TKL Wireless (GameSense-API).
 # Benoetigt Adminrechte (fuer CPU-Temperatur/-Leistung via LibreHardwareMonitor).
 # Das OLED fasst nur 2 Textzeilen, daher wechseln die aktiven Seiten alle $PageSeconds Sekunden.
-# Seiten ein-/ausschalten: Rechtsklick auf das Tray-Symbol. Auswahl liegt in config.json.
-param([int]$IntervalMs = 1000, [int]$PageSeconds = 5, [switch]$Once, [string]$GameName = 'CPUGPU_STATS')
+# Seiten und Optionen schalten: Rechtsklick auf das Tray-Symbol. Auswahl liegt in config.json.
+param([int]$IntervalMs = 1000, [int]$PageSeconds = 5, [switch]$Once, [switch]$SimulateWarning, [string]$GameName = 'CPUGPU_STATS')
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -29,24 +29,33 @@ if (-not $Once) {
 
 # --- Seiten und Einstellungen --------------------------------------------
 $pageDefs = [ordered]@{
-    cpugpu  = 'CPU + GPU (Temperatur, Watt)'
+    cpugpu  = 'CPU + GPU (Temperatur, Last, Watt)'
     water   = 'Wasserkuehlung (Kraken)'
     gpuload = 'GPU-Last + VRAM'
     arc     = 'ARC Raiders: Steam-Spieler'
     net     = 'Netzwerk: Download / Upload'
+    peak    = 'Spitzenwerte seit Start'
+}
+$optionDefs = [ordered]@{
+    warn = 'Warnung bei Ueberhitzung (Display + rotes Blinken)'
+    rgb  = 'RGB-Pegel auf F1-F12 (CPU / GPU / Wasser)'
 }
 $ArcAppId = 1808500
 $ArcRefreshSeconds = 60
-$script:cfg = @{}
-foreach ($k in $pageDefs.Keys) { $script:cfg[$k] = $true }
+
+$script:cfg = @{}; foreach ($k in $pageDefs.Keys) { $script:cfg[$k] = $true }
+$script:opt = @{}; foreach ($k in $optionDefs.Keys) { $script:opt[$k] = $true }
+$script:warnCfg = @{ cpu = 95; gpu = 83; water = 55 }   # Schwellen in Grad C
 if (Test-Path $cfgPath) {
     try {
         $saved = Get-Content $cfgPath -Raw | ConvertFrom-Json
         foreach ($k in $pageDefs.Keys) { if ($null -ne $saved.pages.$k) { $script:cfg[$k] = [bool]$saved.pages.$k } }
+        foreach ($k in $optionDefs.Keys) { if ($null -ne $saved.options.$k) { $script:opt[$k] = [bool]$saved.options.$k } }
+        foreach ($k in 'cpu', 'gpu', 'water') { if ($null -ne $saved.warn.$k) { $script:warnCfg[$k] = [double]$saved.warn.$k } }
     } catch { Write-Log "config.json unlesbar: $($_.Exception.Message)" }
 }
 function Save-Config {
-    try { (@{ pages = $script:cfg } | ConvertTo-Json) | Set-Content -Path $cfgPath -Encoding UTF8 } catch { Write-Log "config.json nicht speicherbar: $($_.Exception.Message)" }
+    try { (@{ pages = $script:cfg; options = $script:opt; warn = $script:warnCfg } | ConvertTo-Json) | Set-Content -Path $cfgPath -Encoding UTF8 } catch { Write-Log "config.json nicht speicherbar: $($_.Exception.Message)" }
 }
 
 # --- Sensoren -------------------------------------------------------------
@@ -103,6 +112,18 @@ function Get-GpuStats {
 
 function Fmt($v, $unit) { if ($null -eq $v) { '--' } else { '{0}{1}' -f ([math]::Round($v)).ToString([Globalization.CultureInfo]::InvariantCulture), $unit } }
 
+# Alle Sensoren einmal pro Sekunde lesen; Seiten, Spitzenwerte, Warnungen und RGB nutzen denselben Schnappschuss
+$script:snap = $null
+$script:peak = @{}
+function Update-Peak($key, $v) {
+    if ($null -ne $v -and ($null -eq $script:peak[$key] -or $v -gt $script:peak[$key])) { $script:peak[$key] = $v }
+}
+function Sample-All {
+    $script:snap = @{ cpu = (Get-CpuStats); gpu = (Get-GpuStats); water = (Get-WaterStats) }
+    Update-Peak 'cpuT' $script:snap.cpu.Temp; Update-Peak 'cpuW' $script:snap.cpu.Watt
+    Update-Peak 'gpuT' $script:snap.gpu.Temp; Update-Peak 'gpuW' $script:snap.gpu.Watt
+}
+
 # Netzwerk: Durchsatz in Mbit/s aus den Adapter-Zaehlern (nur echte Ethernet-/WLAN-Adapter)
 $script:netPrev = @{}; $script:netPrevAt = 0L; $script:netDown = $null; $script:netUp = $null
 function Update-Net {
@@ -151,24 +172,23 @@ function Get-ArcPlayers {
     $script:arcCount
 }
 
+# Mehr als 15 Zeichen passen nicht ins Display (z. B. "GPU 37 100% 116W"): dann das W weglassen
+function Limit-Lines($lines) { @($lines | ForEach-Object { if ($_.Length -gt 15) { $_.TrimEnd('W') } else { $_ } }) }
+
 function Get-Lines([string]$page) {
     $ci = [Globalization.CultureInfo]::InvariantCulture
+    $c = $script:snap.cpu; $g = $script:snap.gpu; $w = $script:snap.water
     switch ($page) {
         'cpugpu' {
-            $c = Get-CpuStats; $g = Get-GpuStats
             # Ein Leerzeichen zwischen allen Teilen; Temperatur ohne Einheit, damit die GPU-Zeile ins Display passt
-            $l = @(('CPU {0} {1} {2}' -f (Fmt $c.Temp ''), (Fmt $c.Load '%'), (Fmt $c.Watt 'W')),
-                   ('GPU {0} {1} {2}' -f (Fmt $g.Temp ''), (Fmt $g.Load '%'), (Fmt $g.Watt 'W')))
-            # Mehr als 15 Zeichen passen nicht ins Display (z. B. "GPU 37 100% 116W"): dann das W weglassen
-            @($l | ForEach-Object { if ($_.Length -gt 15) { $_.TrimEnd('W') } else { $_ } })
+            Limit-Lines @(('CPU {0} {1} {2}' -f (Fmt $c.Temp ''), (Fmt $c.Load '%'), (Fmt $c.Watt 'W')),
+                          ('GPU {0} {1} {2}' -f (Fmt $g.Temp ''), (Fmt $g.Load '%'), (Fmt $g.Watt 'W')))
         }
         'water' {
-            $w = Get-WaterStats
             @(('H2O {0}' -f (Fmt $w.Temp 'C')),
               ('Pumpe {0}' -f (Fmt $w.Pump 'rpm')))
         }
         'gpuload' {
-            $g = Get-GpuStats
             $vram = if ($null -ne $g.MemUsed -and $null -ne $g.MemTotal) {
                 'VRAM {0}/{1}G' -f ($g.MemUsed / 1024).ToString('0.0', $ci), ($g.MemTotal / 1024).ToString('0', $ci)
             } else { 'VRAM --' }
@@ -180,12 +200,38 @@ function Get-Lines([string]$page) {
         'arc' {
             $n = Get-ArcPlayers
             $txt = if ($null -ne $n) { $n.ToString('N0', [Globalization.CultureInfo]::GetCultureInfo('de-DE')) } else { '--' }
-            @('ARC Raiders',('Spieler {0}' -f $txt))
+            @('ARC Raiders', ('Spieler {0}' -f $txt))
+        }
+        'peak' {
+            $p = $script:peak
+            Limit-Lines @(('Max CPU {0} {1}' -f (Fmt $p.cpuT ''), (Fmt $p.cpuW 'W')),
+                          ('Max GPU {0} {1}' -f (Fmt $p.gpuT ''), (Fmt $p.gpuW 'W')))
         }
     }
 }
 
 function Get-ActivePages { @($pageDefs.Keys | Where-Object { $script:cfg[$_] }) }
+
+# --- Ueberhitzungswarnung ----------------------------------------------------
+$script:warnState = @{ cpu = $false; gpu = $false; water = $false }
+$script:warnVals = @{}
+$script:simUntil = [datetime]::MinValue   # "Warnung testen": GPU gilt bis dahin als 99 Grad
+function Update-Warnings {
+    $vals = @{ cpu = $script:snap.cpu.Temp; gpu = $script:snap.gpu.Temp; water = $script:snap.water.Temp }
+    if ($SimulateWarning -or (Get-Date) -lt $script:simUntil) { $vals.gpu = 99 }
+    foreach ($k in 'cpu', 'gpu', 'water') {
+        $v = $vals[$k]
+        if (-not $script:opt.warn -or $null -eq $v) { $script:warnState[$k] = $false; continue }
+        if ($script:warnState[$k]) { if ($v -lt $script:warnCfg[$k] - 3) { $script:warnState[$k] = $false } }   # 3 Grad Hysterese
+        elseif ($v -ge $script:warnCfg[$k]) { $script:warnState[$k] = $true }
+    }
+    $script:warnVals = $vals
+}
+function Get-ActiveWarnings { @('gpu', 'cpu', 'water' | Where-Object { $script:warnState[$_] }) }
+function Get-WarnLines([string]$key) {
+    $name = @{ cpu = 'CPU'; gpu = 'GPU'; water = 'H2O' }[$key]
+    @(('!! {0} HEISS !!' -f $name), ('Temp {0}C' -f [math]::Round($script:warnVals[$key])))
+}
 
 # --- GameSense ------------------------------------------------------------
 $script:base = $null
@@ -200,6 +246,26 @@ function Update-Base {
 function Send-GS($path, $obj) {
     $json = $obj | ConvertTo-Json -Depth 12 -Compress
     Invoke-RestMethod -Uri "$script:base/$path" -Method Post -ContentType 'application/json; charset=utf-8' -TimeoutSec 5 -Body ([Text.Encoding]::UTF8.GetBytes($json)) | Out-Null
+}
+
+# RGB-Pegel: F1-F4 = CPU, F5-F8 = GPU, F9-F12 = Wasser (HID-Codes 58..69), Farbverlauf Gruen -> Rot
+$rgbGroups = [ordered]@{ RGB_CPU = 58..61; RGB_GPU = 62..65; RGB_WATER = 66..69 }
+$script:rgbBound = $false
+function Bind-Rgb {
+    $grad = @{ gradient = @{ zero = @{ red = 0; green = 220; blue = 80 }; hundred = @{ red = 255; green = 40; blue = 40 } } }
+    foreach ($e in $rgbGroups.Keys) {
+        Send-GS 'bind_game_event' @{ game = $game; event = $e; min_value = 0; max_value = 100; icon_id = 0
+            handlers = @(@{ 'device-type' = 'rgb-per-key-zones'; 'custom-zone-keys' = @($rgbGroups[$e]); mode = 'percent'; color = $grad }) }
+    }
+    $script:rgbBound = $true
+}
+function Unbind-Rgb {
+    foreach ($e in $rgbGroups.Keys) { try { Send-GS 'remove_game_event' @{ game = $game; event = $e } } catch {} }
+    $script:rgbBound = $false
+}
+function To-Pct($v, $lo, $hi) {
+    if ($null -eq $v) { return 0 }
+    [int][math]::Max(0, [math]::Min(100, ($v - $lo) / ($hi - $lo) * 100))
 }
 
 function Register-App {
@@ -221,12 +287,35 @@ function Register-App {
             })
         })
     }
+    # Warn-Blinken: Zahlenreihe 1-0 blinkt rot
+    Send-GS 'bind_game_event' @{ game = $game; event = 'RGB_FLASH'; min_value = 0; max_value = 100; icon_id = 0
+        handlers = @(@{ 'device-type' = 'rgb-per-key-zones'; zone = 'number-keys'; mode = 'color'; color = @{ red = 255; green = 0; blue = 0 }; rate = @{ frequency = 4; repeat_limit = 8 } }) }
+    $script:rgbBound = $false   # Pegel-Events werden in Sync-Rgb je nach Option neu gebunden
+}
+
+# Pegel- und Blink-Events pro Sekunde senden bzw. entfernen
+$script:lastFlash = [datetime]::MinValue
+function Send-Rgb {
+    if ($script:opt.rgb) {
+        if (-not $script:rgbBound) { Bind-Rgb }
+        Send-GS 'game_event' @{ game = $game; event = 'RGB_CPU';   data = @{ value = (To-Pct $script:snap.cpu.Temp 30 $script:warnCfg.cpu) } }
+        Send-GS 'game_event' @{ game = $game; event = 'RGB_GPU';   data = @{ value = (To-Pct $script:snap.gpu.Temp 30 $script:warnCfg.gpu) } }
+        Send-GS 'game_event' @{ game = $game; event = 'RGB_WATER'; data = @{ value = (To-Pct $script:snap.water.Temp 25 $script:warnCfg.water) } }
+    }
+    elseif ($script:rgbBound) { Unbind-Rgb }
+    if (@(Get-ActiveWarnings).Count -gt 0 -and ((Get-Date) - $script:lastFlash).TotalSeconds -ge 5) {
+        $script:lastFlash = Get-Date
+        Send-GS 'game_event' @{ game = $game; event = 'RGB_FLASH'; data = @{ value = 1 } }
+    }
 }
 
 # --- Testmodus: alle Seiten einmal ausgeben, ohne GG und Tray ------------------
 if ($Once) {
     Update-Net; Start-Sleep -Seconds 2; Update-Net   # Netzwerk braucht zwei Messpunkte
+    Sample-All; Update-Warnings
     foreach ($k in $pageDefs.Keys) { "[$k]"; Get-Lines $k }
+    "[warnungen]"; $aw = @(Get-ActiveWarnings); if ($aw.Count) { foreach ($k in $aw) { Get-WarnLines $k } } else { 'keine' }
+    "[rgb %] CPU={0} GPU={1} H2O={2}" -f (To-Pct $script:snap.cpu.Temp 30 $script:warnCfg.cpu), (To-Pct $script:snap.gpu.Temp 30 $script:warnCfg.gpu), (To-Pct $script:snap.water.Temp 25 $script:warnCfg.water)
     $pc.Close(); return
 }
 
@@ -252,9 +341,12 @@ $notify.Text = 'OLED-Stats (Apex Pro TKL)'
 $menu = New-Object System.Windows.Forms.ContextMenuStrip
 $notify.ContextMenuStrip = $menu
 
-$header = New-Object System.Windows.Forms.ToolStripMenuItem 'Seiten auf dem Display'
-$header.Enabled = $false
-[void]$menu.Items.Add($header)
+function Add-Header($text) {
+    $h = New-Object System.Windows.Forms.ToolStripMenuItem $text
+    $h.Enabled = $false
+    [void]$menu.Items.Add($h)
+}
+Add-Header 'Seiten auf dem Display'
 foreach ($k in $pageDefs.Keys) {
     $item = New-Object System.Windows.Forms.ToolStripMenuItem $pageDefs[$k]
     $item.Tag = $k
@@ -270,6 +362,27 @@ foreach ($k in $pageDefs.Keys) {
     [void]$menu.Items.Add($item)
 }
 [void]$menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
+Add-Header 'Optionen'
+foreach ($k in $optionDefs.Keys) {
+    $item = New-Object System.Windows.Forms.ToolStripMenuItem $optionDefs[$k]
+    $item.Tag = $k
+    $item.Checked = $script:opt[$k]
+    $item.Add_Click({
+        param($sender, $e)
+        $key = [string]$sender.Tag
+        $script:opt[$key] = -not $script:opt[$key]
+        $sender.Checked = $script:opt[$key]
+        Save-Config
+    })
+    [void]$menu.Items.Add($item)
+}
+$resetPeak = New-Object System.Windows.Forms.ToolStripMenuItem 'Spitzenwerte zuruecksetzen'
+$resetPeak.Add_Click({ $script:peak = @{} })
+[void]$menu.Items.Add($resetPeak)
+$testWarn = New-Object System.Windows.Forms.ToolStripMenuItem 'Warnung testen (10 s)'
+$testWarn.Add_Click({ $script:simUntil = (Get-Date).AddSeconds(10) })
+[void]$menu.Items.Add($testWarn)
+[void]$menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
 $quit = New-Object System.Windows.Forms.ToolStripMenuItem 'Beenden'
 $quit.Add_Click({ $script:timer.Stop(); $notify.Visible = $false; [System.Windows.Forms.Application]::ExitThread() })
 [void]$menu.Items.Add($quit)
@@ -280,13 +393,21 @@ $script:timer.Interval = $IntervalMs
 $script:timer.Add_Tick({
     try {
         if ((Get-Date) -lt $script:retryAt) { return }
-        Update-Net   # jede Sekunde messen, damit der Durchsatz auch nach einem Seitenwechsel stimmt
-        $pages = @(Get-ActivePages)   # @() verhindert, dass eine einzelne Seite zum String wird
-        $page = $pages[[int]([math]::Floor($script:clock.Elapsed.TotalSeconds / $PageSeconds) % $pages.Count)]
-        $lines = Get-Lines $page
+        Update-Net     # jede Sekunde messen, damit der Durchsatz auch nach einem Seitenwechsel stimmt
+        Sample-All     # Sensoren einmal lesen (auch fuer Spitzenwerte, Warnungen und RGB)
+        Update-Warnings
+        $warns = @(Get-ActiveWarnings)
+        $step = [int]([math]::Floor($script:clock.Elapsed.TotalSeconds / $PageSeconds))
+        if ($warns.Count -gt 0) {
+            $lines = Get-WarnLines $warns[$step % $warns.Count]   # Warnung hat Vorrang vor allen Seiten
+        } else {
+            $pages = @(Get-ActivePages)   # @() verhindert, dass eine einzelne Seite zum String wird
+            $lines = Get-Lines $pages[$step % $pages.Count]
+        }
         $script:tick = ($script:tick % 99) + 1   # wechselnder Wert, damit GG jedes Event als neu wertet
         if (-not $script:registered) { Register-App; $script:registered = $true }
         Send-GS 'game_event' @{ game = $game; event = 'STATS'; data = @{ value = $script:tick; frame = @{ l1 = $lines[0]; l2 = $lines[1] } } }
+        Send-Rgb
     }
     catch {
         # GG noch nicht bereit, neu gestartet oder anderer Port: spaeter neu anmelden
